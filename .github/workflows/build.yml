@@ -57,14 +57,18 @@ jobs:
           include ':app'
           EOF
 
-          # root build.gradle
+          # root build.gradle - FIXED
           cat << 'EOF' > build.gradle
           plugins {
             id 'com.android.application' version '8.2.2' apply false
           }
+
+          tasks.register('clean', Delete) {
+            delete rootProject.buildDir
+          }
           EOF
 
-          # app/build.gradle
+          # app/build.gradle - FIXED with proper dependencies
           cat << 'EOF' > app/build.gradle
           plugins {
             id 'com.android.application'
@@ -86,11 +90,24 @@ jobs:
               release {
                 minifyEnabled false
               }
+              debug {
+                minifyEnabled false
+                debuggable true
+              }
             }
+            
             compileOptions {
               sourceCompatibility JavaVersion.VERSION_17
               targetCompatibility JavaVersion.VERSION_17
             }
+            
+            packagingOptions {
+              exclude 'META-INF/proguard/androidx-*.pro'
+            }
+          }
+
+          dependencies {
+            implementation 'androidx.appcompat:appcompat:1.6.1'
           }
           EOF
 
@@ -372,9 +389,20 @@ jobs:
       - name: Build Debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
+      - name: Verify APK
+        run: |
+          if [ -f app/build/outputs/apk/debug/app-debug.apk ]; then
+            ls -lh app/build/outputs/apk/debug/app-debug.apk
+            file app/build/outputs/apk/debug/app-debug.apk
+          else
+            echo "APK not found!"
+            exit 1
+          fi
+
       - name: Rename APK for Direct Download
         run: |
           cp app/build/outputs/apk/debug/app-debug.apk ./FocusGuard.apk
+          ls -lh FocusGuard.apk
 
       - name: Publish APK Release
         uses: softprops/action-gh-release@v2

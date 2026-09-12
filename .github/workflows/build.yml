@@ -21,11 +21,294 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x gradlew
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Generate Complete FocusGuard Android Project
+        run: |
+          # 1. Project directories
+          mkdir -p app/src/main/java/com/example/focusguard
+          mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/layout
+
+          # 2. settings.gradle
+          cat << 'EOF' > settings.gradle
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "FocusGuard"
+          include ':app'
+          EOF
+
+          # 3. Root build.gradle
+          cat << 'EOF' > build.gradle
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          EOF
+
+          # 4. app/build.gradle
+          cat << 'EOF' > app/build.gradle
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'com.example.focusguard'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.focusguard"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = '17'
+              }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+          }
+          EOF
+
+          # 5. AndroidManifest.xml
+          cat << 'EOF' > app/src/main/AndroidManifest.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
+
+              <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" tools:ignore="QueryAllPackagesPermission" />
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@android:drawable/ic_lock_lock"
+                  android:label="FocusGuard"
+                  android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <activity
+                      android:name=".LockShieldActivity"
+                      android:theme="@android:style/Theme.Translucent.NoTitleBar"
+                      android:excludeFromRecents="true"
+                      android:exported="false" />
+
+                  <service
+                      android:name=".BlockerAccessibilityService"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          # 6. Accessibility service config
+          cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.xml
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canRetrieveWindowContent="false"
+              android:notificationTimeout="50" />
+          EOF
+
+          # 7. Kotlin Source Code
+          cat << 'EOF' > app/src/main/java/com/example/focusguard/FocusSessionManager.kt
+          package com.example.focusguard
+          import android.os.CountDownTimer
+
+          object FocusSessionManager {
+              val blockedPackages = mutableSetOf<String>()
+              var isSessionActive: Boolean = false
+              var remainingSeconds: Long = 0
+              private var timer: CountDownTimer? = null
+
+              fun start(durationMinutes: Int, onTick: (Long) -> Unit, onFinish: () -> Unit) {
+                  isSessionActive = true
+                  timer?.cancel()
+                  timer = object : CountDownTimer(durationMinutes * 60 * 1000L, 1000) {
+                      override fun onTick(ms: Long) {
+                          remainingSeconds = ms / 1000
+                          onTick(remainingSeconds)
+                      }
+                      override fun onFinish() {
+                          isSessionActive = false
+                          remainingSeconds = 0
+                          onFinish()
+                      }
+                  }.start()
+              }
+
+              fun cancel() {
+                  timer?.cancel()
+                  isSessionActive = false
+                  remainingSeconds = 0
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/focusguard/BlockerAccessibilityService.kt
+          package com.example.focusguard
+          import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
+          import android.view.accessibility.AccessibilityEvent
+
+          class BlockerAccessibilityService : AccessibilityService() {
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event?.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                      val pkg = event.packageName?.toString() ?: return
+                      if (pkg == packageName) return
+                      if (FocusSessionManager.isSessionActive && FocusSessionManager.blockedPackages.contains(pkg)) {
+                          val intent = Intent(this, LockShieldActivity::class.java).apply {
+                              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                              putExtra("BLOCKED_PKG", pkg)
+                          }
+                          startActivity(intent)
+                      }
+                  }
+              }
+              override fun onInterrupt() {}
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/focusguard/LockShieldActivity.kt
+          package com.example.focusguard
+          import android.app.Activity
+          import android.os.Bundle
+          import android.widget.Button
+          import android.widget.TextView
+
+          class LockShieldActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val view = android.widget.LinearLayout(this).apply {
+                      orientation = android.widget.LinearLayout.VERTICAL
+                      setBackgroundColor(0xEE0A0D14.toInt())
+                      gravity = android.view.Gravity.CENTER
+                      setPadding(40, 40, 40, 40)
+                  }
+                  val title = TextView(this).apply {
+                      text = "🛡️ FocusGuard Active"
+                      textSize = 24f
+                      setTextColor(0xFFFFFFFF.toInt())
+                  }
+                  val desc = TextView(this).apply {
+                      text = "This app is locked until your focus timer completes!"
+                      textSize = 14f
+                      setTextColor(0xFFAAAAAA.toInt())
+                      setPadding(0, 20, 0, 40)
+                  }
+                  val btn = Button(this).apply {
+                      text = "Return to Home Screen"
+                      setOnClickListener {
+                          val home = android.content.Intent(android.content.Intent.ACTION_MAIN).apply {
+                              addCategory(android.content.Intent.CATEGORY_HOME)
+                              flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                          }
+                          startActivity(home)
+                          finish()
+                      }
+                  }
+                  view.addView(title)
+                  view.addView(desc)
+                  view.addView(btn)
+                  setContentView(view)
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/example/focusguard/MainActivity.kt
+          package com.example.focusguard
+          import android.content.Intent
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.TextView
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  val layout = android.widget.LinearLayout(this).apply {
+                      orientation = android.widget.LinearLayout.VERTICAL
+                      gravity = android.view.Gravity.CENTER
+                      setPadding(50, 50, 50, 50)
+                  }
+                  val tv = TextView(this).apply {
+                      text = "FocusGuard App Blocker"
+                      textSize = 22f
+                      setPadding(0, 0, 0, 30)
+                  }
+                  val permBtn = Button(this).apply {
+                      text = "1. Enable Accessibility Permission"
+                      setOnClickListener {
+                          startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                      }
+                  }
+                  val testBtn = Button(this).apply {
+                      text = "2. Lock YouTube & Instagram (25 Min)"
+                      setOnClickListener {
+                          FocusSessionManager.blockedPackages.add("com.google.android.youtube")
+                          FocusSessionManager.blockedPackages.add("com.instagram.android")
+                          FocusSessionManager.start(25, {}, {})
+                          text = "Lock Active! Try opening YouTube"
+                      }
+                  }
+                  layout.addView(tv)
+                  layout.addView(permBtn)
+                  layout.addView(testBtn)
+                  setContentView(layout)
+              }
+          }
+          EOF
 
       - name: Build Debug APK
-        run: ./gradlew assembleDebug --stacktrace
+        run: gradle assembleDebug --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
